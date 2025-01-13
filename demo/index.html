@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <style>
+        div {
+            position: relative;
+        }
+        canvas {
+            aspect-ratio: 16/9;
+            max-width: 100vw;
+            max-height: 100vh;
+        }
+
+        canvas:last-child {
+            position: relative;
+        }
+
+        canvas:last-child {
+            top: 0;
+            left: 0;
+            position: absolute;
+        }
+
+        html, body {
+            background-color: black;
+        }
+    </style>
+</head>
+<body>
+    <button>Play m2ts</button>
+    <div>
+        <canvas width="1920" height="1080" id="canvas"></canvas>
+        <canvas width="1920" height="1080"></canvas>
+    </div>
+    <script type="module">
+        import BlurayPlayer from '../dist/BlurayPlayer.js';
+        const player = new BlurayPlayer();
+        document.querySelector('button').onclick = function() {
+            player.openBlurayDirectory(1);
+        }
+    </script>
+</body>
+</html>

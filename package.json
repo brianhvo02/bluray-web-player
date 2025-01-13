@@ -1,0 +1,17 @@
+{
+  "name": "bluray-web-player",
+  "version": "1.0.0",
+  "main": "index.js",
+  "devDependencies": {
+    "nodemon": "^3.1.9",
+    "typescript": "^5.7.3"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "nodemon -e ts -w src -x 'npm run build'"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}

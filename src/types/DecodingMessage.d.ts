@@ -1,0 +1,96 @@
+interface PaletteInfo {
+    id: number;
+    version: number;
+    entries: Record<number, [number, number, number, number]>;
+}
+
+interface ObjectInfo {
+    id: number;
+    version: number;
+    width: number;
+    height: number;
+    decodedData: number[];
+}
+
+interface CompositionVideoDescriptor {
+    videoWidth: number;
+    videoHeight: number;
+    frameRate: number;
+}
+
+interface CompositionDescriptor {
+    number: number;
+    state: number;
+}
+
+interface CompositionObject {
+    objectIdRef: number;
+    windowIdRef: number;
+    cropFlag: boolean;
+    forcedOnFlag: boolean;
+    x: number;
+    y: number;
+    crop?: {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+    }
+}
+
+interface CompositionInfo {
+    videoDescriptor: CompositionVideoDescriptor;
+    compositionDescriptor: CompositionDescriptor;
+    paletteUpdateFlag: boolean;
+    paletteIdRef: number;
+    compositionObjects: CompositionObject[];
+}
+
+interface GraphicWindow {
+    id: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+interface WindowInfo {
+    windows: GraphicWindow[];
+}
+
+interface DisplaySet {
+    timestamp: number;
+    paletteInfo: PaletteInfo;
+    objectInfo: ObjectInfo;
+    compositionInfo: CompositionInfo;
+    windowInfo: WindowInfo;
+    bitmap: ImageBitmap;
+}
+
+interface BlurayPlayerOptions {
+    canvasId?: string;
+}
+
+interface DecodingVideoMessage {
+    type: 'video';
+    frame: VideoFrame;
+}
+
+interface DecodingAudioMessage {
+    type: 'audio';
+    channels: number;
+    sampleRate: number;
+    audio: Float32Array[];
+}
+
+interface DecodingSubtitlesMessage {
+    type: 'subtitle';
+    displaySet: DisplaySet;
+}
+
+type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage;
+
+interface AudioStreamInfo {
+    channels: number;
+    sampleRate: number;
+}
