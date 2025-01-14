@@ -1,9 +1,10 @@
-import BlurayRegister, { isValidRegister, PSR_FLAG } from './BlurayRegister.js';
+import BlurayRegister, { isValidRegister, PSR_FLAG, PsrIdx } from './BlurayRegister.js';
 import { MAX_SAMPLES } from './consts.js';
-import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet } from './HdmvInsn.js';
-import { byteArrToString, getPathArrayBuffer, getStreams } from './utils.js';
+import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet, HdmvInsnPlay } from './HdmvInsn.js';
+import { byteArrToString, getBit, getPathArrayBuffer, getStreams, uoMaskParse } from './utils.js';
 
 export default class BlurayPlayer {
+    dirHandle?: FileSystemDirectoryHandle;
     audioSize = 0;
     videoReady = false;
     audioPlaying = false;
@@ -86,8 +87,11 @@ export default class BlurayPlayer {
         }
     }
 
-    static getMovieObject(buf: Uint8Array) {
-        const dataView = new DataView(buf.buffer);
+    private async getMovieObject() {
+        if (!this.dirHandle) return;
+        const mobjBuf = await getPathArrayBuffer(this.dirHandle, 'BDMV/MovieObject.bdmv');
+        const buf = new Uint8Array(mobjBuf);
+        const dataView = new DataView(mobjBuf);
         const bdHeader: BlurayHeader = {
             tag: byteArrToString(buf, 0, 4),
             ver: byteArrToString(buf, 4, 4),
@@ -129,7 +133,7 @@ export default class BlurayPlayer {
         return { bdHeader, objs };
     }
 
-    fetchOperand(setStream: boolean, setButtonPage: boolean, imm: boolean, value: number) {
+    private fetchOperand(setStream: boolean, setButtonPage: boolean, imm: boolean, value: number) {
         if (imm) return value;
     
         if (setStream) {
@@ -161,7 +165,18 @@ export default class BlurayPlayer {
     
     }
 
-    runMovieObject() {
+    async playAt(playlistIdx: number, playitem: number, playmark: number) {
+        const playlist = await this.getPlaylist(playlistIdx);
+        if (playitem >= 0) {
+            
+        } else if (playmark >= 0) {
+            
+        } else {
+            
+        }
+    }
+
+    async runMovieObject() {
         if (!this.mobj) return false;
         const obj = this.mobj.objs[this.titleIdx];
         if (!obj) return false;
@@ -224,9 +239,15 @@ export default class BlurayPlayer {
                         break;
                     case HdmvInsnGrpBranch.PLAY:
                         switch (cmd.insn.branchOpt) {
-            //                 case INSN_PLAY_PL:      _play_at(p, dst,  -1,  -1); break;
-            //                 case INSN_PLAY_PL_PI:   _play_at(p, dst, src,  -1); break;
-            //                 case INSN_PLAY_PL_PM:   _play_at(p, dst,  -1, src); break;
+                            case HdmvInsnPlay.PLAY_PL:
+                                await this.playAt(dst,  -1,  -1);
+                                break;
+                            case HdmvInsnPlay.PLAY_PL_PI:
+                                await this.playAt(dst, src,  -1);
+                                break;
+                            case HdmvInsnPlay.PLAY_PL_PM:
+                                await this.playAt(dst,  -1, src);
+                                break;
             //                 case INSN_LINK_PI:      _link_at(p,      dst,  -1); break;
             //                 case INSN_LINK_MK:      _link_at(p,       -1, dst); break;
             //                 case INSN_TERMINATE_PL: if (!_play_stop(p)) { inc_pc = 0; } break;
@@ -335,7 +356,31 @@ export default class BlurayPlayer {
                     }
                     case HdmvInsnGrpSet.SETSYSTEM:
                         switch (cmd.insn.setOpt) {
-            //                 case INSN_SET_STREAM:      _set_stream     (p, dst, src); break;
+                            case HdmvInsnSetSystem.SET_STREAM:
+                                /* primary audio stream */
+                                if (dst & 0x80000000)
+                                    this.register.psrRegister[PsrIdx.PSR_PRIMARY_AUDIO_ID] = (dst >> 16) & 0xfff;
+
+                                /* IG stream */
+                                if (src & 0x80000000)
+                                    this.register.psrRegister[PsrIdx.PSR_IG_STREAM_ID] = (src >> 16) & 0xff;
+
+                                /* angle number */
+                                if (src & 0x8000)
+                                    this.register.psrRegister[PsrIdx.PSR_ANGLE_NUMBER] = src & 0xff;
+
+                                /* PSR2 */
+                                let psr2 = this.register.psrRegister[PsrIdx.PSR_PG_STREAM];
+
+                                /* PG TextST stream number */
+                                if (dst & 0x8000)
+                                    psr2 = (dst & 0xfff) | (psr2 & 0xfffff000);
+
+                                /* Update PG TextST stream display flag */
+                                psr2 = ((dst & 0x4000) << 17) | (psr2 & 0x7fffffff);
+
+                                this.register.psrRegister[PsrIdx.PSR_PG_STREAM] = psr2;
+                                break;
             //                 case INSN_SET_SEC_STREAM:  _set_sec_stream (p, dst, src); break;
             //                 case INSN_SET_NV_TIMER:    _set_nv_timer   (p, dst, src); break;
             //                 case INSN_SET_BUTTON_PAGE: _set_button_page(p, dst, src); break;
@@ -367,15 +412,102 @@ export default class BlurayPlayer {
         return true;
     }
 
+    async getPlaylist(idx: number) {
+        if (!this.dirHandle) return;
+
+        const playlistNum = idx.toString().padStart(5, '0');
+        const playlistBuf = await getPathArrayBuffer(this.dirHandle, `BDMV/PLAYLIST/${playlistNum}.mpls`);
+        const buf = new Uint8Array(playlistBuf);
+        const dataView = new DataView(playlistBuf);
+        const bdHeader: BlurayHeader = {
+            tag: byteArrToString(buf, 0, 4),
+            ver: byteArrToString(buf, 4, 4),
+        };
+        if (bdHeader.tag !== 'MPLS')
+            throw new Error('Invalid playlist');
+
+        const listPos = dataView.getUint32(8);
+        const markPos = dataView.getUint32(12);
+        const extPos = dataView.getUint32(16);
+
+        // const len = dataView.getUint32(40);
+        const headerIdx = 45;
+        const playlistHeader = {
+            playbackType: buf[headerIdx],
+            playbackCount: (buf[headerIdx] === 2 || buf[headerIdx] === 3) ? dataView.getUint16(headerIdx + 1) : 0,
+            uoMask: uoMaskParse(buf.slice(headerIdx + 3, headerIdx + 7)),
+            randomAccessFlag: Boolean(getBit(buf[headerIdx + 7], 7)),
+            audioMixFlag: Boolean(getBit(buf[headerIdx + 7], 6)),
+            losslessBypassFlag: Boolean(getBit(buf[headerIdx + 7], 5)),
+            mvcBaseViewFlag: Boolean(getBit(buf[headerIdx + 7], 4)),
+            sdrConversionNotificationFlag: Boolean(getBit(buf[headerIdx + 7], 3)),
+        };
+        
+        // const len = dataView.getUint32(listPos);
+        const playlistInfo = {
+            playItems: Array(dataView.getUint16(listPos + 6)).fill(0).reduce(([offset, playItems]) => {
+                const codecId = byteArrToString(buf, offset + 7, 4);
+                if (codecId !== 'M2TS' && codecId !== 'FMTS')
+                    console.error('Incorrect CodecIdentifier', codecId);
+                const isMultiAngle = Boolean(getBit(buf[offset + 12], 4));
+                const connectionCondition = buf[offset + 12] & 0x0F;
+                if (![0x01, 0x05, 0x06].includes(connectionCondition))
+                    console.error('Unexpected connection condition');
+                const angleCount = isMultiAngle ? buf[offset + 30] : 1;
+
+                const stnIdx = offset + 29 + Number(isMultiAngle) * 3;
+
+                const parseStream = function([offset, streams]: [number, any[]]) {
+                    streams.push({
+                        
+                    });
+                    return [offset + buf[offset], streams];
+                }
+
+                const [videoLen, videoStreams] = Array(buf[stnIdx]).fill(0)
+                    .reduce(parseStream, [stnIdx + 12, []]);
+
+                const stn = {
+                    video: videoStreams,
+                };
+
+                playItems.push({
+                    clipId: byteArrToString(buf, offset + 2, 5),
+                    codecId,
+                    isMultiAngle,
+                    connectionCondition,
+                    stcId: buf[offset + 13],
+                    inTime: dataView.getUint32(offset + 14),
+                    outTime: dataView.getUint32(offset + 18),
+                    uoMask: uoMaskParse(buf.slice(offset + 18, offset + 26)),
+                    privateAccessFlag: Boolean(getBit(buf[offset + 26], 7)),
+                    stillMode: buf[offset + 27],
+                    stillTime: buf[offset + 27] === 0x01 ? dataView.getUint16(offset + 28) : 0,
+                    angleCount: angleCount < 1 ? 1 : angleCount,
+                    isDifferentAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 1)),
+                    isSeamlessAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 0)),
+                    // TODO: Multi-angle clips
+                    stn,
+                });
+                return [offset + dataView.getUint16(offset) + 2, playItems];
+            }, [listPos + 10, []])[1],
+        }
+        console.log(playlistInfo);
+    }
+
     async openBlurayDirectory(dirHandle: FileSystemDirectoryHandle) {
         // this.decodingWorker.postMessage({ dirHandle });
         // this.clpi = await new Promise<ClpiInfo>(resolve => {
         //     this.resolveClpi = resolve;
         // });
 
-        const mobjBuf = await getPathArrayBuffer(dirHandle, 'BDMV/MovieObject.bdmv');
-        this.mobj = BlurayPlayer.getMovieObject(new Uint8Array(mobjBuf));
-        this.runMovieObject();
+        this.dirHandle = dirHandle;
+        this.mobj = await this.getMovieObject() ?? null;
+
+        let continueObj = true;
+        do {
+            continueObj = await this.runMovieObject();
+        } while (continueObj);
         
         // return getStreams(this.clpi);
     }

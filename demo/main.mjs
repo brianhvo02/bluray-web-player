@@ -11,9 +11,5 @@ document.querySelector('button').onclick = async function() {
 
 const dirHandle = await get('BDMV');
 await player.openBlurayDirectory(dirHandle, 2);
-let continueObj = true;
-do {
-    continueObj = player.runMovieObject();
-} while (continueObj);
 // console.log(player.register.gprRegister)
 // player.demux({ audio: 0 });
