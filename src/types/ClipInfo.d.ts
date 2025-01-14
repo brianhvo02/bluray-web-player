@@ -1,3 +1,59 @@
+enum VideoFormat {
+    FORMAT_480I = 1,
+    FORMAT_576I = 2,
+    FORMAT_480P = 3,
+    FORMAT_1080I = 4,
+    FORMAT_720P = 5,
+    FORMAT_1080P = 6,
+    FORMAT_576P = 7,
+    FORMAT_2160P = 8,
+}
+   
+enum VideoRate {
+    RATE_24000_1001 = 1,
+    RATE_24 = 2,
+    RATE_25 = 3,
+    RATE_30000_1001 = 4,
+    RATE_50 = 6,
+    RATE_60000_1001 = 7,
+}
+
+enum VideoAspectRatio {
+    ASPECT_RATIO_4_3 = 2,
+    ASPECT_RATIO_16_9 = 3,
+}
+   
+enum AudioFormat {
+    MONO = 1,
+    STEREO = 3,
+    MULTI_CHANNEL = 6,
+    COMBO = 12,
+}
+   
+enum AudioRate {
+    RATE_48 = 1,
+    RATE_96 = 4,
+    RATE_192 = 5,
+    RATE_192_COMBO = 12,
+    RATE_96_COMBO = 14
+}
+   
+enum CharCode {
+    UTF8 = 0x01,
+    UTF16BE = 0x02,
+    SHIFT_JIS = 0x03,
+    EUC_KR = 0x04,
+    GB18030_20001 = 0x05,
+    CN_GB = 0x06,
+    BIG5 = 0x07,
+}
+   
+enum DynamicRangeType {
+    SDR = 0,
+    HDR10 = 1,
+    DOLBY_VISION = 2,
+}
+
 interface BlurayHeader {
     tag: string;
     ver: string;
@@ -36,27 +92,32 @@ interface SequenceInfo {
 
 interface ProgramStream {
     pid: number;
-    codingType: number;
+    codingType: StreamType;
 }
 
 interface VideoProgramStream extends ProgramStream {
-    format: number;
-    rate: number;
-    aspect: number;
+    format: VideoFormat;
+    rate: VideoRate;
+    aspect: VideoAspectRatio;
     ocFlag: number;
     crFlag?: number;
-    dynamicRangeType?: number;
+    dynamicRangeType?: DynamicRangeType;
     colorSpace?: number;
     hdrPlusFlag?: number;
 }
 
 interface AudioProgramStream extends ProgramStream {
-    format: number;
-    rate: number;
+    format: AudioFormat;
+    rate: AudioRate;
     lang: string;
 }
 
 interface SubtitleProgramStream extends ProgramStream {
+    lang: string;
+}
+
+interface TextProgramStream extends ProgramStream {
+    charCode: CharCode;
     lang: string;
 }
 
@@ -104,4 +165,10 @@ interface ClpiInfo {
     sequenceInfo: SequenceInfo;
     programInfo: ProgramInfo;
     cpiInfo: CpiInfo;
+}
+
+interface StreamMap {
+    video: VideoProgramStream[];
+    audio: AudioProgramStream[];
+    subtitle: SubtitleProgramStream[];
 }

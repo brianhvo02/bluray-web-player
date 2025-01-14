@@ -88,9 +88,15 @@ interface DecodingSubtitlesMessage {
     displaySet: DisplaySet;
 }
 
-type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage;
+interface DecodingClipInfoMessage {
+    type: 'clipInfo';
+    clpi: ClpiInfo;
+}
 
-interface AudioStreamInfo {
-    channels: number;
-    sampleRate: number;
+type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage;
+
+interface DemuxOptions {
+    video?: number;
+    audio?: number;
+    subtitle?: number;
 }

@@ -35,12 +35,6 @@
         <canvas width="1920" height="1080" id="canvas"></canvas>
         <canvas width="1920" height="1080"></canvas>
     </div>
-    <script type="module">
-        import BlurayPlayer from '../dist/BlurayPlayer.js';
-        const player = new BlurayPlayer();
-        document.querySelector('button').onclick = function() {
-            player.openBlurayDirectory(1);
-        }
-    </script>
+    <script type="module" src="main.mjs"></script>
 </body>
 </html>

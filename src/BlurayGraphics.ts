@@ -45,14 +45,21 @@ export default class BlurayGraphics {
     animate() {
         if (!this.start) return requestAnimationFrame(this.animate.bind(this));
             
-        const time = performance.now();
+        let time = performance.now();
         const currentFrameIdx = Math.floor((time - this.start) / 1000 * 24 / 1.001);
     
+        if (this.frames.length < currentFrameIdx - this.frameIdx)
+            console.log('Frames, overrun');
         if (this.frameIdx < currentFrameIdx && this.frames.length > currentFrameIdx - this.frameIdx) {
             const framesToDraw = this.frames.splice(0, currentFrameIdx - this.frameIdx);
             framesToDraw.forEach(frame => {
-                if (this.frameIdx + 1 === currentFrameIdx)
+                if (this.frameIdx + 1 === currentFrameIdx) {
+                    if (this.ctx.canvas.width !== frame.displayWidth)
+                        this.ctx.canvas.width = frame.displayWidth;
+                    if (this.ctx.canvas.height !== frame.displayHeight)
+                        this.ctx.canvas.height = frame.displayHeight;
                     this.ctx.drawImage(frame, 0, 0);
+                }
                 self.postMessage({ timestamp: frame.timestamp })
                 frame.close();
                 this.frameIdx++;

@@ -3,12 +3,15 @@
   "version": "1.0.0",
   "main": "index.js",
   "devDependencies": {
+    "concurrently": "^9.1.2",
     "nodemon": "^3.1.9",
+    "serve": "^14.2.4",
     "typescript": "^5.7.3"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "nodemon -e ts -w src -x 'npm run build'"
+    "dev": "nodemon -e ts -w src -x 'npm run build'",
+    "dev:demo": "concurrently 'npm run dev' 'serve'"
   },
   "keywords": [],
   "author": "",
