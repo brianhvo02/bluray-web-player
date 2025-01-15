@@ -7,14 +7,15 @@ const config: VideoDecoderConfig = {
     codedHeight: 1080,
 }
 
-export default class BlurayDecoder {
+class BlurayDecoder {
     file: File;
     clpi: ClpiInfo;
     initialPacketIdx: number;
-    private loaded = false;
+    // private loaded = false;
     private startPts = Infinity;
     private videoContinuity: number | null = null;
     private audioContinuity: number | null = null;
+    private prevVideoTimestamp: number | null = null;
     private pendingVideo: Uint8Array[] = [];
     private pendingAudio: number[] = [];
     private pendingPg: Uint8Array[] = [];
@@ -22,7 +23,8 @@ export default class BlurayDecoder {
     private channels = 0;
     private sampleRate = 0
     private displaySet: Partial<DisplaySet> = {};
-    private decoder: VideoDecoder;
+    private decoder: VideoDecoder | null = null;
+    private newDecoder = true;
     streamMap: StreamMap;
     currentVideoPid: number | null = null;
     currentAudioPid: number | null = null;
@@ -252,32 +254,25 @@ export default class BlurayDecoder {
         return (spnEp & ~0x1FFFF) + entry.fine[refEpFineId + fineIdx].spnEp;
     }
 
-    static init = async () => new Promise<BlurayDecoder>(async resolve => {
-        const { supported } = await VideoDecoder.isConfigSupported(config);
-        if (!supported) throw new Error('codec not supported');
-
-        self.onmessage = async e => {
-            const { dirHandle, idx, time } = e.data;
-            
-            const filename = idx.toString().padStart(5, '0');
-            const clpi = await getPathArrayBuffer(dirHandle, `BDMV/CLIPINF/${filename}.clpi`)
-                .then(this.getClipInfo);
-        
-            const fh = await getPathHandle(dirHandle, `BDMV/STREAM/${filename}.m2ts`);
-            const file = await fh.getFile();
-
-            self.onmessage = null;
-            self.postMessage({ type: 'clipInfo', clpi });
-            
-            resolve(new this(file, clpi, time));
-        
-            // const file = await fetch('/local/BDMV/STREAM/00002.m2ts', {
-            //     headers: { 'Range': `bytes=0-` }
-            // }).then(res => res.blob());
+    getDecoder() {
+        if (!this.decoder || this.decoder.state === 'closed') {
+            this.newDecoder = true;
+            this.decoder = new VideoDecoder({
+                output: async function(frame) {
+                    // @ts-ignore
+                    self.postMessage({ type: 'video', frame }, [frame]);
+                },
+                error: function(e) {
+                    self.postMessage({ type: 'decodingComplete' });
+                },
+            });
+            this.decoder.configure(config);
         }
-    });
 
-    private constructor(file: File, clpi: ClpiInfo, time?: number) {
+        return this.decoder;
+    } 
+
+    constructor(file: File, clpi: ClpiInfo, time?: number) {
         this.file = file;
         this.clpi = clpi;
         this.streamMap = getStreams(clpi);
@@ -290,17 +285,6 @@ export default class BlurayDecoder {
             }
             resolve();
         });
-
-        this.decoder = new VideoDecoder({
-            output: async function(frame) {
-                // @ts-ignore
-                self.postMessage({ type: 'video', frame }, [frame]);
-            },
-            error: function(e) {
-                console.error(e);
-            },
-        });
-        this.decoder.configure(config);
     }
 
     private getPacketInfo(packet: Uint8Array) {
@@ -529,7 +513,8 @@ export default class BlurayDecoder {
         }
         this.audioContinuity = continuityCounter;
 
-        if (((timestamp ?? 0) < this.startPts || this.startPts === Infinity) && this.audioPacketSize === null) return;
+        if (this.audioPacketSize === null && startCode && !continuityCounter)
+            this.audioPacketSize = newPacketSize;
         const header = payload.slice(0, 4);
         if (startCode && header[0] === 0x05 && header[1] === 0xA0) {
             if (this.pendingAudio.length) {
@@ -573,8 +558,38 @@ export default class BlurayDecoder {
         }
     }
 
+    private async decodeVideoBuf() {
+        const newBuf = joinArrayBuffers(this.pendingVideo);
+
+        const iframeIdx = newBuf.findIndex((val, idx, arr) => val === 0 && arr[idx + 1] === 0 && (
+            (arr[idx + 2] === 1 && arr[idx - 1] !== 0 && (arr[idx + 3] & 0x1F) === 5) ||
+            (arr[idx + 2] === 0 && arr[idx + 3] === 1 && (arr[idx + 4] & 0x1F) === 5)
+        ));
+        const iframe = iframeIdx > -1;
+
+        const decoder = this.getDecoder();
+        if (this.newDecoder && !iframe) return;
+        else this.newDecoder = false;
+        
+        try {
+            if (iframe) await decoder.flush();
+            decoder.decode(new EncodedVideoChunk({
+                timestamp: this.prevVideoTimestamp ?? 0,
+                type: iframe ? 'key' : 'delta',
+                data: newBuf,
+            }));
+        } catch(e) {
+            return;
+        }
+    }
+
     private async decodeVideoPacket(packet: Uint8Array) {
+        if (packet.byteLength === 0)
+            return this.decodeVideoBuf();
+        
         const { startCode, timestamp, continuityCounter, payload } = this.getPacketInfo(packet);
+        if (startCode && this.prevVideoTimestamp === null)
+            this.prevVideoTimestamp = timestamp;
 
         if (this.videoContinuity === null)
             this.videoContinuity = continuityCounter - 1;
@@ -587,27 +602,11 @@ export default class BlurayDecoder {
         this.videoContinuity = continuityCounter;
         
         if (this.pendingVideo.length && startCode) {
-            const newBuf = joinArrayBuffers(this.pendingVideo);
-            
-            const iframe = newBuf.findIndex((val, idx, arr) => val === 0 && arr[idx + 1] === 0 && (
-                (arr[idx + 2] === 1 && arr[idx - 1] !== 0 && (arr[idx + 3] & 0x1F) === 5) ||
-                (arr[idx + 2] === 0 && arr[idx + 3] === 1 && (arr[idx + 4] & 0x1F) === 5)
-            )) > -1;
-
-            if (iframe) await this.decoder.flush();
-
-            if (this.loaded || iframe) {
-                if (!this.loaded) this.startPts = timestamp ?? 0;
-                this.decoder.decode(new EncodedVideoChunk({
-                    timestamp: timestamp ?? 0,
-                    type: iframe ? 'key' : 'delta',
-                    data: newBuf,
-                }));
-                this.loaded = true;
-            }
+            await this.decodeVideoBuf();
 
             this.pendingVideo.length = 0;
             this.pendingVideo.push(payload);
+            this.prevVideoTimestamp = timestamp;
         } else this.pendingVideo.push(payload);
     }
 
@@ -616,15 +615,19 @@ export default class BlurayDecoder {
         this.currentVideoPid =  this.streamMap.video[options?.video ?? 0]?.pid ?? null;
         this.currentAudioPid = this.streamMap.audio[options?.audio ?? 0]?.pid ?? null;
         this.currentSubtitlePid = this.streamMap.subtitle[options?.subtitle ?? 0]?.pid ?? null;
+        console.log('demuxing', this.file.name);
 
         const max = Math.ceil(this.file.size / (GIGABYTE_PACKETS * 192));
         for (this.gib = 0; this.gib < max; this.gib++) {
             const buf = await this.buffers[this.gib];
             for (this.idx = 0; this.idx < buf.byteLength / 192; this.idx++) {
+                if (this.decoder?.state === 'closed')
+                    return;
+
                 const packet = new Uint8Array(buf.slice(this.idx * 192, (this.idx + 1) * 192));
                 if (packet[4] !== 0x47) {
                     console.error('sync byte not present at', this.idx * 192);
-                    this.decoder.close();
+                    return;
                 }
                 const pid = ((packet[5] & 0x1F) << 8) | packet[6];
                 // console.log('pid:', pid.toString(16).padStart(4, '0').toUpperCase());
@@ -639,13 +642,31 @@ export default class BlurayDecoder {
                     await this.decodeVideoPacket(packet);
             }
         }
+
+        await this.decodeVideoPacket(new Uint8Array());
+        self.postMessage({ type: 'decodingComplete' });
+        // const newBuf = joinArrayBuffers(this.pendingVideo);
+        // test.push(newBuf);
+        // console.log('done')
     }
 }
 
-const decoder = await BlurayDecoder.init();
+const { supported } = await VideoDecoder.isConfigSupported(config);
+if (!supported) throw new Error('codec not supported');
 
-onmessage = async function(e) {
-    if (e.data.demux) {
-        decoder.demux(e.data);
-    }
+let decoder: BlurayDecoder | null = null;
+onmessage = async function(e: MessageEvent<DemuxOptions>) {
+    if (decoder) decoder.getDecoder().close();
+    const { dirHandle, clipId, ...options } = e.data;
+    
+    const clpi = await getPathArrayBuffer(dirHandle, `BDMV/CLIPINF/${clipId}.clpi`)
+        .then(BlurayDecoder.getClipInfo);
+
+    const fh = await getPathHandle(dirHandle, `BDMV/STREAM/${clipId}.m2ts`);
+    const file = await fh.getFile();
+
+    // self.postMessage({ type: 'clipInfo', clpi });
+    
+    decoder = new BlurayDecoder(file, clpi);
+    decoder.demux();
 }

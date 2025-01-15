@@ -93,9 +93,15 @@ interface DecodingClipInfoMessage {
     clpi: ClpiInfo;
 }
 
-type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage;
+interface DecodingCompleteMessage {
+    type: 'decodingComplete'
+}
+
+type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage | DecodingCompleteMessage;
 
 interface DemuxOptions {
+    dirHandle: FileSystemDirectoryHandle;
+    clipId: string;
     video?: number;
     audio?: number;
     subtitle?: number;

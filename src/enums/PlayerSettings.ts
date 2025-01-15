@@ -81,7 +81,6 @@ export enum OutputPrefer {
     PREFER_3D = 1,  /**< 3D output preferred */
 }
 
-
 /*
  * BLURAY_PLAYER_SETTING_DISPLAY_CAP (PSR23)
  *

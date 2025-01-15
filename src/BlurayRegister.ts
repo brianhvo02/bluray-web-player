@@ -4,7 +4,7 @@
  * PS in comment indicates player setting -> register can't be changed from movie object code.
  */
 
-import { AudioCapability, OutputPrefer, PlayerProfile, Region, VideoCapability } from './PlayerSettings.js';
+import { AudioCapability, OutputPrefer, PlayerProfile, Region, VideoCapability } from './enums/PlayerSettings.js';
 
 export const PSR_FLAG = 0x80000000;
 const GPR_COUNT = 4096;

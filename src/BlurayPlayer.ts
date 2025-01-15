@@ -1,7 +1,9 @@
 import BlurayRegister, { isValidRegister, PSR_FLAG, PsrIdx } from './BlurayRegister.js';
 import { MAX_SAMPLES } from './consts.js';
-import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet, HdmvInsnPlay } from './HdmvInsn.js';
-import { byteArrToString, getBit, getPathArrayBuffer, getStreams, uoMaskParse } from './utils.js';
+import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet, HdmvInsnPlay, HdmvInsnJump, HdmvInsnCmp } from './enums/HdmvInsn.js';
+import { IndexObjectType } from './enums/Index.js';
+import { IndexRoot, IndexAppInfo, IndexTitle, indxObjIsHdmv } from './Index.js';
+import { byteArrToString, getBit, getPathArrayBuffer, getStreams, StreamType, uoMaskParse } from './utils.js';
 
 export default class BlurayPlayer {
     dirHandle?: FileSystemDirectoryHandle;
@@ -16,11 +18,14 @@ export default class BlurayPlayer {
     resolveClpi?: (value: ClpiInfo | PromiseLike<ClpiInfo>) => void;
     register = new BlurayRegister();
     mobj: MovieObject | null = null;
+    indx: IndexRoot | null = null;
     titleIdx = 0;
     cmdIdx = 0;
     playlistIdx: Number | null = null;
 
     constructor(options?: BlurayPlayerOptions) {
+        // @ts-ignore
+        window.register = this.register;
         const canvas = document.getElementById(options?.canvasId ?? 'canvas');
         if (!canvas || !(canvas instanceof HTMLCanvasElement))
             throw new Error(`No <canvas> element with id ${options?.canvasId ?? 'canvas'} found`);
@@ -67,6 +72,11 @@ export default class BlurayPlayer {
                     this.graphicsWorker.postMessage({ displaySet }, [displaySet.bitmap]);
                     return;
                 }
+                case 'decodingComplete': {
+                    this.cmdIdx++;
+                    this.runMovieObjectLoop();
+                    return;
+                }
             }
         }
 
@@ -87,8 +97,8 @@ export default class BlurayPlayer {
         }
     }
 
-    private async getMovieObject() {
-        if (!this.dirHandle) return;
+    private async getMovieObject(): Promise<MovieObject | null> {
+        if (!this.dirHandle) return null;
         const mobjBuf = await getPathArrayBuffer(this.dirHandle, 'BDMV/MovieObject.bdmv');
         const buf = new Uint8Array(mobjBuf);
         const dataView = new DataView(mobjBuf);
@@ -165,15 +175,26 @@ export default class BlurayPlayer {
     
     }
 
-    async playAt(playlistIdx: number, playitem: number, playmark: number) {
+    async playAt(playlistIdx: number, playitemIdx: number, playmarkIdx: number) {
+        if (!this.dirHandle) return false;
+
         const playlist = await this.getPlaylist(playlistIdx);
-        if (playitem >= 0) {
-            
-        } else if (playmark >= 0) {
-            
-        } else {
-            
+        if (!playlist) {
+            console.error('no playlist found');
+            return false;
         }
+
+        const playMark = playmarkIdx >= 0 ? playlist.playMarks[playmarkIdx] : null;
+        const playItem = playMark
+            ? {}
+            : playitemIdx >= 0 
+                ? playlist.playItems[playitemIdx] 
+                : playlist.playItems[0];
+        // this.clpi = await new Promise<ClpiInfo>(resolve => {
+        //     this.resolveClpi = resolve;
+        // });
+        this.demux({ dirHandle: this.dirHandle, clipId: playItem.clipId });
+        return false;
     }
 
     async runMovieObject() {
@@ -227,7 +248,22 @@ export default class BlurayPlayer {
                             break;
                         }
                         switch (cmd.insn.branchOpt) {
-            //                 case INSN_JUMP_TITLE:  _jump_title(p, dst); break;
+                            case HdmvInsnJump.JUMP_TITLE: {
+                                if (!this.indx) {
+                                    console.error('no index to jump title!');
+                                    return false;
+                                }
+                                console.log('jump title:', dst);
+                                const title = this.indx.titles[dst - 1];
+                                if (indxObjIsHdmv(title)) {
+                                    this.titleIdx = title.idRef;
+                                    this.cmdIdx = 0;
+                                    return true;
+                                } else {
+                                    console.error('jump title to bdj is not supported, aborting... ');
+                                    return false;
+                                }
+                            }
             //                 case INSN_CALL_TITLE:  _call_title(p, dst); break;
             //                 case INSN_RESUME:      _resume_object(p, 1);   break;
             //                 case INSN_JUMP_OBJECT: if (!_jump_object(p, dst)) { inc_pc = 0; } break;
@@ -240,14 +276,11 @@ export default class BlurayPlayer {
                     case HdmvInsnGrpBranch.PLAY:
                         switch (cmd.insn.branchOpt) {
                             case HdmvInsnPlay.PLAY_PL:
-                                await this.playAt(dst,  -1,  -1);
-                                break;
+                                return this.playAt(dst,  -1,  -1);
                             case HdmvInsnPlay.PLAY_PL_PI:
-                                await this.playAt(dst, src,  -1);
-                                break;
+                                return this.playAt(dst, src,  -1);
                             case HdmvInsnPlay.PLAY_PL_PM:
-                                await this.playAt(dst,  -1, src);
-                                break;
+                                return this.playAt(dst,  -1, src);
             //                 case INSN_LINK_PI:      _link_at(p,      dst,  -1); break;
             //                 case INSN_LINK_MK:      _link_at(p,       -1, dst); break;
             //                 case INSN_TERMINATE_PL: if (!_play_stop(p)) { inc_pc = 0; } break;
@@ -267,13 +300,13 @@ export default class BlurayPlayer {
                 if (cmd.insn.opCnt  < 2) 
                     console.error('missing operand in BRANCH/JUMP');
                 switch (cmd.insn.cmpOpt) {
-            //         case INSN_BC: p->pc += !!(dst & ~src); break;
-            //         case INSN_EQ: p->pc += !(dst == src); break;
-            //         case INSN_NE: p->pc += !(dst != src); break;
-            //         case INSN_GE: p->pc += !(dst >= src); break;
-            //         case INSN_GT: p->pc += !(dst >  src); break;
-            //         case INSN_LE: p->pc += !(dst <= src); break;
-            //         case INSN_LT: p->pc += !(dst <  src); break;
+                    case HdmvInsnCmp.BC: this.cmdIdx += Number(!!(dst & ~src)); break;
+                    case HdmvInsnCmp.EQ: this.cmdIdx += Number(!(dst == src)); break;
+                    case HdmvInsnCmp.NE: this.cmdIdx += Number(!(dst != src)); break;
+                    case HdmvInsnCmp.GE: this.cmdIdx += Number(!(dst >= src)); break;
+                    case HdmvInsnCmp.GT: this.cmdIdx += Number(!(dst >  src)); break;
+                    case HdmvInsnCmp.LE: this.cmdIdx += Number(!(dst <= src)); break;
+                    case HdmvInsnCmp.LT: this.cmdIdx += Number(!(dst <  src)); break;
                     default:
                         console.error('unknown COMPARE option');
                         break;
@@ -444,75 +477,302 @@ export default class BlurayPlayer {
         };
         
         // const len = dataView.getUint32(listPos);
-        const playlistInfo = {
-            playItems: Array(dataView.getUint16(listPos + 6)).fill(0).reduce(([offset, playItems]) => {
-                const codecId = byteArrToString(buf, offset + 7, 4);
-                if (codecId !== 'M2TS' && codecId !== 'FMTS')
-                    console.error('Incorrect CodecIdentifier', codecId);
-                const isMultiAngle = Boolean(getBit(buf[offset + 12], 4));
-                const connectionCondition = buf[offset + 12] & 0x0F;
-                if (![0x01, 0x05, 0x06].includes(connectionCondition))
-                    console.error('Unexpected connection condition');
-                const angleCount = isMultiAngle ? buf[offset + 30] : 1;
+        const [playItemsLen, playItems] = Array(dataView.getUint16(listPos + 6)).fill(0).reduce(([offset, playItems]) => {
+            const codecId = byteArrToString(buf, offset + 7, 4);
+            if (codecId !== 'M2TS' && codecId !== 'FMTS')
+                console.error('Incorrect CodecIdentifier', codecId);
+            const isMultiAngle = Boolean(getBit(buf[offset + 12], 4));
+            const connectionCondition = buf[offset + 12] & 0x0F;
+            if (![0x01, 0x05, 0x06].includes(connectionCondition))
+                console.error('Unexpected connection condition');
+            const angleCount = (isMultiAngle && buf[offset + 30] > 1) ? buf[offset + 30] : 1;
 
-                const stnIdx = offset + 29 + Number(isMultiAngle) * 3;
+            const stnIdx = offset + 34 + Number(isMultiAngle) * 3;
 
-                const parseStream = function([offset, streams]: [number, any[]]) {
-                    streams.push({
-                        
-                    });
-                    return [offset + buf[offset], streams];
-                }
-
-                const [videoLen, videoStreams] = Array(buf[stnIdx]).fill(0)
-                    .reduce(parseStream, [stnIdx + 12, []]);
-
-                const stn = {
-                    video: videoStreams,
+            const parseStream = function([offset, streams]: [number, any[]]) {
+                const streamType = buf[offset + 1];
+                const streamInfo: {
+                    pid: number;
+                    subpathId?: number;
+                    subclipId?: number;
+                } = { pid: 0 };
+                switch (streamType) {
+                    case 1:
+                        streamInfo.pid = dataView.getUint16(offset + 2);
+                        break;
+            
+                    case 2:
+                        streamInfo.subpathId = buf[offset + 2];
+                        streamInfo.subclipId = buf[offset + 3];
+                        streamInfo.pid       = dataView.getUint16(offset + 4);
+                        break;
+            
+                    case 3:
+                    case 4:
+                        streamInfo.subpathId = buf[offset + 2];
+                        streamInfo.pid       = dataView.getUint16(offset + 3);
+                        break;
+            
+                    default:
+                        console.error('unrecognized stream type');
+                        break;
+                };            
+                const dataOffset = offset + buf[offset] + 1;
+                const codingType = buf[dataOffset + 1];
+                switch (codingType) {
+                    case StreamType.VIDEO_MPEG1:
+                    case StreamType.VIDEO_MPEG2:
+                    case StreamType.VIDEO_VC1:
+                    case StreamType.VIDEO_H264:
+                    case StreamType.VIDEO_HEVC:
+                        streams.push({
+                            ...streamInfo,
+                            codingType,
+                            format: (buf[dataOffset + 2] & 0xF0) >> 4,
+                            rate: buf[dataOffset + 2] & 0x0F,
+                            ...(codingType === StreamType.VIDEO_HEVC ? {
+                                dynamicRangeType: (buf[dataOffset + 3] & 0xF0) >> 4,
+                                colorSpace: buf[dataOffset + 3] & 0x0F,
+                                crFlag: Boolean(getBit(buf[dataOffset + 4], 7)),
+                                hdrPlusFlag: Boolean(getBit(buf[dataOffset + 4], 6)),
+                            } : {})
+                        });
+                        break;
+            
+                    case StreamType.AUDIO_MPEG1:
+                    case StreamType.AUDIO_MPEG2:
+                    case StreamType.AUDIO_LPCM:
+                    case StreamType.AUDIO_AC3:
+                    case StreamType.AUDIO_DTS:
+                    case StreamType.AUDIO_TRUHD:
+                    case StreamType.AUDIO_AC3PLUS:
+                    case StreamType.AUDIO_DTSHD:
+                    case StreamType.AUDIO_DTSHD_MASTER:
+                    case StreamType.AUDIO_AC3PLUS_SECONDARY:
+                    case StreamType.AUDIO_DTSHD_SECONDARY:
+                        streams.push({
+                            ...streamInfo,
+                            codingType,
+                            format: (buf[dataOffset + 2] & 0xF0) >> 4,
+                            rate: buf[dataOffset + 2] & 0x0F,
+                            lang: byteArrToString(buf, dataOffset + 3, 3),
+                        });
+                        break;
+            
+                    case StreamType.SUB_PG:
+                    case StreamType.SUB_IG:
+                        streams.push({
+                            ...streamInfo,
+                            codingType,
+                            lang: byteArrToString(buf, dataOffset + 2, 3),
+                        });
+                        break;
+            
+                    case StreamType.SUB_TEXT:
+                        streams.push({
+                            ...streamInfo,
+                            codingType,
+                            charCode: buf[dataOffset + 2],
+                            lang: byteArrToString(buf, dataOffset + 3, 3),
+                        });
+                        break;
+            
+                    default:
+                        console.error('unrecognized coding type');
+                        break;
                 };
+            
+                return [dataOffset + buf[dataOffset] + 1, streams];
+            }
 
-                playItems.push({
-                    clipId: byteArrToString(buf, offset + 2, 5),
-                    codecId,
-                    isMultiAngle,
-                    connectionCondition,
-                    stcId: buf[offset + 13],
-                    inTime: dataView.getUint32(offset + 14),
-                    outTime: dataView.getUint32(offset + 18),
-                    uoMask: uoMaskParse(buf.slice(offset + 18, offset + 26)),
-                    privateAccessFlag: Boolean(getBit(buf[offset + 26], 7)),
-                    stillMode: buf[offset + 27],
-                    stillTime: buf[offset + 27] === 0x01 ? dataView.getUint16(offset + 28) : 0,
-                    angleCount: angleCount < 1 ? 1 : angleCount,
-                    isDifferentAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 1)),
-                    isSeamlessAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 0)),
-                    // TODO: Multi-angle clips
-                    stn,
-                });
-                return [offset + dataView.getUint16(offset) + 2, playItems];
-            }, [listPos + 10, []])[1],
-        }
-        console.log(playlistInfo);
+            const [videoLen, videoStreams] = Array(buf[stnIdx + 4]).fill(0)
+                .reduce(parseStream, [stnIdx + 16, []]);
+            const [audioLen, audioStreams] = Array(buf[stnIdx + 5]).fill(0)
+                .reduce(parseStream, [videoLen, []]);
+            const [pgLen, pgStreams] = Array(buf[stnIdx + 6]).fill(0)
+                .reduce(parseStream, [audioLen, []]);
+            const [igLen, igStreams] = Array(buf[stnIdx + 7]).fill(0)
+                .reduce(parseStream, [pgLen, []]);
+            const [secondaryAudioLen, secondaryAudioStreams] = Array(buf[stnIdx + 8]).fill(0)
+                .reduce(parseStream, [igLen, []]);
+            const [secondaryVideoLen, secondaryVideoStreams] = Array(buf[stnIdx + 9]).fill(0)
+                .reduce(parseStream, [secondaryAudioLen, []]);
+            const [pipPgLen, pipPgStreams] = Array(buf[stnIdx + 10]).fill(0)
+                .reduce(parseStream, [secondaryVideoLen, []]);
+            const [_, dvStreams] = Array(buf[stnIdx + 11]).fill(0)
+                .reduce(parseStream, [pipPgLen, []]);
+
+            const stn = {
+                video: videoStreams,
+                audio: audioStreams,
+                pg: pgStreams,
+                ig: igStreams,
+                secondaryAudio: secondaryAudioStreams,
+                secondaryVideo: secondaryVideoStreams,
+                pipPg: pipPgStreams,
+                dv: dvStreams,
+            };
+
+            playItems.push({
+                clipId: byteArrToString(buf, offset + 2, 5),
+                codecId,
+                isMultiAngle,
+                connectionCondition,
+                stcId: buf[offset + 13],
+                inTime: dataView.getUint32(offset + 14),
+                outTime: dataView.getUint32(offset + 18),
+                uoMask: uoMaskParse(buf.slice(offset + 18, offset + 26)),
+                privateAccessFlag: Boolean(getBit(buf[offset + 26], 7)),
+                stillMode: buf[offset + 27],
+                stillTime: buf[offset + 27] === 0x01 ? dataView.getUint16(offset + 28) : 0,
+                // angleCount,
+                isDifferentAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 1)),
+                isSeamlessAngle: isMultiAngle && Boolean(getBit(buf[offset + 31], 0)),
+                // TODO: Multi-angle clips
+                stn,
+            });
+            return [offset + dataView.getUint16(offset) + 2, playItems];
+        }, [listPos + 10, []]);
+
+        const subPaths = Array(dataView.getUint16(listPos + 8)).fill(0).reduce(([offset, subPaths]) => {
+            subPaths.push({
+                type: buf[offset + 5],
+                isRepeat: getBit(buf[offset + 7], 0),
+                subPlayItem: Array(buf[offset + 9]).fill(0).reduce(([offset, subPlayItems]) => {
+                    const codecId = byteArrToString(buf, offset + 7, 4);
+                    if (codecId !== 'M2TS' && codecId !== 'FMTS')
+                        console.error('Incorrect CodecIdentifier', codecId);
+                    const connectionCondition = (buf[offset + 14] & 0x1E) >> 1;
+                    if (![0x01, 0x05, 0x06].includes(connectionCondition))
+                        console.error('Unexpected connection condition');
+                    const isMultiClip = Boolean(getBit(buf[offset + 14], 0));
+                    const clipCount = (isMultiClip && buf[offset + 30] > 1) ? buf[offset + 30] : 1;
+                    subPlayItems.push({
+                        clipId: byteArrToString(buf, offset + 2, 5),
+                        codecId,
+                        connectionCondition,
+                        isMultiClip,
+                        stcId: buf[offset + 15],
+                        inTime: dataView.getUint32(offset + 16),
+                        outTime: dataView.getUint32(offset + 20),
+                        syncPlayItemId: dataView.getUint16(offset + 24),
+                        syncPts: dataView.getUint32(offset + 26),
+                        // clipCount,
+                        // TODO: Multi clips
+                    });
+                    return [offset + dataView.getUint16(offset), subPlayItems];
+                }, [offset + 10, []])[1],
+            });
+            return [offset + dataView.getUint32(offset), subPaths];
+        }, [playItemsLen, []])[1];
+
+        // const len = dataView.getUint32(markPos);
+        const playMarks = [...Array(dataView.getUint16(markPos + 4)).keys()].map(i => {
+            const playMarkIdx = markPos + 6 + i * 14;
+            return {
+                markType: buf[playMarkIdx + 1],
+                playItemRef: dataView.getUint16(playMarkIdx + 2),
+                time: dataView.getUint32(playMarkIdx + 4),
+                entryEsPid: dataView.getUint16(playMarkIdx + 8),
+                duration: dataView.getUint32(playMarkIdx + 10),
+            };
+        });
+
+        // TODO: Parse mpls ext data
+
+        return { playlistHeader, playItems, subPaths, playMarks };
     }
 
-    async openBlurayDirectory(dirHandle: FileSystemDirectoryHandle) {
-        // this.decodingWorker.postMessage({ dirHandle });
-        // this.clpi = await new Promise<ClpiInfo>(resolve => {
-        //     this.resolveClpi = resolve;
-        // });
+    async getIndex(): Promise<IndexRoot | null> {
+        if (!this.dirHandle) return null;
+        const idxBuf = await getPathArrayBuffer(this.dirHandle, 'BDMV/index.bdmv');
+        const buf = new Uint8Array(idxBuf);
+        const dataView = new DataView(idxBuf);
+        const bdHeader: BlurayHeader = {
+            tag: byteArrToString(buf, 0, 4),
+            ver: byteArrToString(buf, 4, 4),
+        };
+        if (bdHeader.tag !== 'INDX')
+            throw new Error('Invalid index');
+        const indexStart = dataView.getUint32(8);
+        const extensionStart = dataView.getUint32(12);
+        
+        const len = dataView.getUint32(40);
+        if (len != 34) console.error(`index.bdmv app_info length is ${len}, expected 34!`);
 
-        this.dirHandle = dirHandle;
-        this.mobj = await this.getMovieObject() ?? null;
+        const appInfo: IndexAppInfo = {
+            initialOutputModePreference: getBit(buf[44], 6),
+            contentExistFlag: Boolean(getBit(buf[44], 5)),
+            initialDynamicRangeType: buf[44] & 0x0F,
+            videoFormat: (buf[45] & 0xF0) >> 4,
+            frameRate: buf[45] & 0x0F,
+            userData: dataView.getUint32(46),
+        }
 
+        const indexLen = dataView.getUint32(indexStart);
+
+        const parseObject = function(idx: number): IndexTitle{
+            const objectType = (buf[idx] & 0xC0) >> 6;
+            return {
+                objectType,
+                playbackType: (buf[idx + 4] & 0xC0) >> 6,
+                ...(objectType === IndexObjectType.HDMV ? {
+                    idRef: dataView.getUint16(idx + 6)
+                } : {
+                    name: byteArrToString(buf, idx + 6, 5)
+                }),
+            }
+        }
+
+        const firstPlay = parseObject(indexStart + 4);
+        const topMenu = parseObject(indexStart + 16);
+
+        const titles = [...Array(dataView.getUint16(indexStart + 28)).keys()]
+            .map(i => parseObject(indexStart + 30 + i * 12));
+
+        // TODO: Parse UHD extension
+
+        return { appInfo, firstPlay, topMenu, titles };
+    }
+
+    async runMovieObjectLoop() {
         let continueObj = true;
         do {
             continueObj = await this.runMovieObject();
         } while (continueObj);
-        
-        // return getStreams(this.clpi);
     }
 
-    demux(options?: DemuxOptions) {
-        this.decodingWorker.postMessage({ demux: true, ...options });
+    async openBlurayDirectory(dirHandle: FileSystemDirectoryHandle) {
+        this.dirHandle = dirHandle;
+        this.mobj = await this.getMovieObject();
+        this.indx = await this.getIndex();
+        if (!this.indx || !this.mobj) return;
+
+        if (this.indx.firstPlay) {
+            if (indxObjIsHdmv(this.indx.firstPlay))
+                this.titleIdx = this.indx.firstPlay.idRef;
+            else {
+                console.error('bdj not yet supported. aborting...');
+                return;
+            }
+        } else {
+            if (indxObjIsHdmv(this.indx.titles[0]))
+                this.titleIdx = this.indx.titles[0].idRef;
+            else {
+                console.error('bdj not yet supported. aborting...');
+                return;
+            }
+        }
+
+        // this.demux({ dirHandle, clipId: '00000' });
+        // this.clpi = await new Promise<ClpiInfo>(resolve => {
+        //     this.resolveClpi = resolve;
+        // });
+
+        this.runMovieObjectLoop();
+    }
+
+    demux(options: DemuxOptions) {
+        this.decodingWorker.postMessage(options);
     }
 }
