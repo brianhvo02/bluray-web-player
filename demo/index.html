@@ -8,17 +8,14 @@
         div {
             position: relative;
         }
-        canvas {
+        
+        video, canvas {
             aspect-ratio: 16/9;
             max-width: 100vw;
             max-height: 100vh;
         }
 
-        canvas:last-child {
-            position: relative;
-        }
-
-        canvas:last-child {
+        canvas {
             top: 0;
             left: 0;
             position: absolute;
@@ -32,8 +29,8 @@
 <body>
     <button>Play m2ts</button>
     <div>
+        <video controls autoplay></video>
         <canvas width="1920" height="1080" id="canvas"></canvas>
-        <canvas width="1920" height="1080"></canvas>
     </div>
     <script type="module" src="main.mjs"></script>
 </body>

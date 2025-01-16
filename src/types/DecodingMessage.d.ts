@@ -69,6 +69,7 @@ interface DisplaySet {
 
 interface BlurayPlayerOptions {
     canvasId?: string;
+    videoEl: HTMLVideoElement;
 }
 
 interface DecodingVideoMessage {
@@ -78,9 +79,7 @@ interface DecodingVideoMessage {
 
 interface DecodingAudioMessage {
     type: 'audio';
-    channels: number;
-    sampleRate: number;
-    audio: Float32Array[];
+    audio: AudioData;
 }
 
 interface DecodingSubtitlesMessage {
@@ -102,6 +101,7 @@ type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSub
 interface DemuxOptions {
     dirHandle: FileSystemDirectoryHandle;
     clipId: string;
+    time: number;
     video?: number;
     audio?: number;
     subtitle?: number;

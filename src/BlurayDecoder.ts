@@ -7,21 +7,21 @@ const config: VideoDecoderConfig = {
     codedHeight: 1080,
 }
 
+let flag = true;
+
 class BlurayDecoder {
     file: File;
     clpi: ClpiInfo;
     initialPacketIdx: number;
-    // private loaded = false;
-    private startPts = Infinity;
     private videoContinuity: number | null = null;
     private audioContinuity: number | null = null;
     private prevVideoTimestamp: number | null = null;
+    private prevAudioTimestamp: number | null = null;
     private pendingVideo: Uint8Array[] = [];
-    private pendingAudio: number[] = [];
+    private pendingAudio: Uint8Array[] = [];
     private pendingPg: Uint8Array[] = [];
     private audioPacketSize: number | null = null;
-    private channels = 0;
-    private sampleRate = 0
+    private audioOffset: number | null = null;
     private displaySet: Partial<DisplaySet> = {};
     private decoder: VideoDecoder | null = null;
     private newDecoder = true;
@@ -263,7 +263,7 @@ class BlurayDecoder {
                     self.postMessage({ type: 'video', frame }, [frame]);
                 },
                 error: function(e) {
-                    self.postMessage({ type: 'decodingComplete' });
+                    // self.postMessage({ type: 'decodingComplete' });
                 },
             });
             this.decoder.configure(config);
@@ -272,7 +272,7 @@ class BlurayDecoder {
         return this.decoder;
     } 
 
-    constructor(file: File, clpi: ClpiInfo, time?: number) {
+    constructor(file: File, clpi: ClpiInfo, time: number) {
         this.file = file;
         this.clpi = clpi;
         this.streamMap = getStreams(clpi);
@@ -422,8 +422,8 @@ class BlurayDecoder {
                 }
                 case 0x16: { // PGS_PG_COMPOSITION
                     // console.log('PGS_PG_COMPOSITION');
-                    if (timestamp)
-                        this.displaySet.timestamp = timestamp;
+                    const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
+                    this.displaySet.timestamp = ((timestamp ?? baseTs) - baseTs) / 90 * 1000;
                     this.displaySet.compositionInfo = {
                         videoDescriptor: {
                             videoWidth: dataView.getUint16(3),
@@ -515,50 +515,56 @@ class BlurayDecoder {
 
         if (this.audioPacketSize === null && startCode && !continuityCounter)
             this.audioPacketSize = newPacketSize;
-        const header = payload.slice(0, 4);
-        if (startCode && header[0] === 0x05 && header[1] === 0xA0) {
+        if (startCode && this.prevAudioTimestamp === null)
+            this.prevAudioTimestamp = timestamp;
+        if (startCode && payload[0] === 0x05 && payload[1] === 0xA0) {
             if (this.pendingAudio.length) {
-                if (this.audioPacketSize) {
+                if (this.audioPacketSize)
                     console.error('PES packet mismatch');
-                    this.pendingAudio.length = 0;
-                } else if (this.channels && this.sampleRate) {
-                    const channels = Array(this.channels).fill(0)
-                        .map(() => new Uint8Array(this.pendingAudio.length / 3 * 4 / this.channels));
-                    this.pendingAudio.forEach((val, i) => {
-                        const channel = channels[Math.floor((i % (3 * channels.length)) / 3)]
-                        const byteCur = Math.floor(i / (3 * channels.length));
-                        const cur = byteCur * 4 + Math.abs(i % 3 - 2) + 1;
-                        if (cur === 1) channel.set([0], byteCur * 4);
-                        channel.set(([val]), cur);
-                    });
-                    const audio = channels.map(channel => new Float32Array(
-                        [...new Int32Array(channel.buffer)]
-                            .map(val => val < 0 ? -val / MIN_INT : val / MAX_INT)
-                    ));
-                    self.postMessage({ 
-                        type: 'audio', 
-                        channels: this.channels,
-                        sampleRate: this.sampleRate,
-                        audio, timestamp,
-                    });
-                    
-                    this.pendingAudio.length = 0;
+                const payload = joinArrayBuffers(this.pendingAudio);
+
+                const channelLayout = CHANNEL_LAYOUTS[payload[2] >> 4];
+                const numberOfChannels = channelLayout?.channels ?? 0;
+                const sampleRate = SAMPLE_RATE[payload[2] & 0x0f];
+                const buf = payload.slice(4);
+                const data = new Uint8Array(buf.byteLength / 3 * 4);
+
+                for (let i = 0; i < buf.byteLength / 3; i++) {
+                    const idx = i * 3;
+                    data.set([0, buf[idx + 2], buf[idx + 1], buf[idx]], i * 4);
                 }
+
+                const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
+                if (!this.audioOffset) 
+                    this.audioOffset = this.prevAudioTimestamp ?? baseTs;
+                const audio = new AudioData({
+                    format: 's32',
+                    sampleRate,
+                    numberOfFrames: data.byteLength / 4 / numberOfChannels,
+                    numberOfChannels,
+                    timestamp: ((this.prevAudioTimestamp ?? baseTs) - this.audioOffset) / 90 * 1000,
+                    data,
+                    transfer: [data.buffer],
+                });
+                    
+                self.postMessage({ 
+                    type: 'audio', 
+                    audio, timestamp,
+                });
             };
+            this.pendingAudio.length = 0;
             this.audioPacketSize = newPacketSize;
-            
-            const channelLayout = CHANNEL_LAYOUTS[header[2] >> 4];
-            this.channels = channelLayout?.channels ?? 0;
-            this.sampleRate = SAMPLE_RATE[header[2] & 0x0f];
-            this.pendingAudio.push(...payload.slice(4));
+            this.prevAudioTimestamp = timestamp;
+            this.pendingAudio.push(payload);
         } else {
-            this.pendingAudio.push(...payload);
+            this.pendingAudio.push(payload);
             if (this.audioPacketSize !== null)
                 this.audioPacketSize -= payload.byteLength;
         }
     }
 
     private async decodeVideoBuf() {
+        const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
         const newBuf = joinArrayBuffers(this.pendingVideo);
 
         const iframeIdx = newBuf.findIndex((val, idx, arr) => val === 0 && arr[idx + 1] === 0 && (
@@ -574,7 +580,7 @@ class BlurayDecoder {
         try {
             if (iframe) await decoder.flush();
             decoder.decode(new EncodedVideoChunk({
-                timestamp: this.prevVideoTimestamp ?? 0,
+                timestamp: ((this.prevVideoTimestamp ?? baseTs) - baseTs) / 90 * 1000,
                 type: iframe ? 'key' : 'delta',
                 data: newBuf,
             }));
@@ -618,9 +624,9 @@ class BlurayDecoder {
         console.log('demuxing', this.file.name);
 
         const max = Math.ceil(this.file.size / (GIGABYTE_PACKETS * 192));
-        for (this.gib = 0; this.gib < max; this.gib++) {
+        for (this.gib = Math.floor(this.initialPacketIdx / GIGABYTE_PACKETS); this.gib < max; this.gib++) {
             const buf = await this.buffers[this.gib];
-            for (this.idx = 0; this.idx < buf.byteLength / 192; this.idx++) {
+            for (this.idx = this.initialPacketIdx % GIGABYTE_PACKETS; this.idx < buf.byteLength / 192; this.idx++) {
                 if (this.decoder?.state === 'closed')
                     return;
 
@@ -643,11 +649,19 @@ class BlurayDecoder {
             }
         }
 
-        await this.decodeVideoPacket(new Uint8Array());
-        self.postMessage({ type: 'decodingComplete' });
+        // if (this.getDecoder().state !== 'closed')
+        //     self.postMessage({ type: 'decodingComplete' });
+
+        // await this.decodeVideoPacket(new Uint8Array());
+        // self.postMessage({ type: 'decodingComplete' });
         // const newBuf = joinArrayBuffers(this.pendingVideo);
         // test.push(newBuf);
         // console.log('done')
+    }
+
+    close() {
+        this.gib = Math.ceil(this.file.size / (GIGABYTE_PACKETS * 192));
+        this.getDecoder().close();
     }
 }
 
@@ -655,9 +669,13 @@ const { supported } = await VideoDecoder.isConfigSupported(config);
 if (!supported) throw new Error('codec not supported');
 
 let decoder: BlurayDecoder | null = null;
+let demuxer: Promise<void> | null = null;
 onmessage = async function(e: MessageEvent<DemuxOptions>) {
-    if (decoder) decoder.getDecoder().close();
-    const { dirHandle, clipId, ...options } = e.data;
+    if (decoder) {
+        decoder.close();
+        await demuxer;
+    }
+    const { dirHandle, clipId, time, ...options } = e.data;
     
     const clpi = await getPathArrayBuffer(dirHandle, `BDMV/CLIPINF/${clipId}.clpi`)
         .then(BlurayDecoder.getClipInfo);
@@ -665,8 +683,8 @@ onmessage = async function(e: MessageEvent<DemuxOptions>) {
     const fh = await getPathHandle(dirHandle, `BDMV/STREAM/${clipId}.m2ts`);
     const file = await fh.getFile();
 
-    // self.postMessage({ type: 'clipInfo', clpi });
+    self.postMessage({ type: 'clipInfo', clpi });
     
-    decoder = new BlurayDecoder(file, clpi);
-    decoder.demux();
+    decoder = new BlurayDecoder(file, clpi, time);
+    demuxer = decoder.demux();
 }

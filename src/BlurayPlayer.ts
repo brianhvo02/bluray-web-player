@@ -14,18 +14,23 @@ export default class BlurayPlayer {
     timestamp = 0;
     graphicsWorker: Worker;
     decodingWorker: Worker;
-    clpi?: ClpiInfo;
-    resolveClpi?: (value: ClpiInfo | PromiseLike<ClpiInfo>) => void;
+    // clpi?: ClpiInfo;
+    // resolveClpi?: (value: ClpiInfo | PromiseLike<ClpiInfo>) => void;
     register = new BlurayRegister();
     mobj: MovieObject | null = null;
     indx: IndexRoot | null = null;
+    init = false;
     titleIdx = 0;
     cmdIdx = 0;
     playlistIdx: Number | null = null;
+    videoEl: HTMLVideoElement;
 
-    constructor(options?: BlurayPlayerOptions) {
+    constructor(options: BlurayPlayerOptions) {
         // @ts-ignore
         window.register = this.register;
+        
+        this.videoEl = options.videoEl;
+        
         const canvas = document.getElementById(options?.canvasId ?? 'canvas');
         if (!canvas || !(canvas instanceof HTMLCanvasElement))
             throw new Error(`No <canvas> element with id ${options?.canvasId ?? 'canvas'} found`);
@@ -35,65 +40,66 @@ export default class BlurayPlayer {
         this.graphicsWorker.postMessage({ canvas: offscreenCanvas }, [offscreenCanvas]);
 
         this.decodingWorker = new Worker(new URL('./BlurayDecoder.js', import.meta.url), { type: 'module' });
-
         this.decodingWorker.onmessage = async (e: MessageEvent<DecodingMessage>) => {
             switch (e.data.type) {
                 case 'clipInfo': {
-                    if (this.resolveClpi)
-                        this.resolveClpi(e.data.clpi);
+                    this.init = false;
+                    // if (this.resolveClpi)
+                    //     this.resolveClpi(e.data.clpi);
                     return;
                 }
                 case 'video': {
+                    if (this.init) return;
                     const { frame } = e.data;
                     this.graphicsWorker.postMessage({ frame }, [frame]);
                     return;
                 }
                 case 'audio': {
-                    const { channels, sampleRate, audio } = e.data;
-                    if (!this.audioSource) {
-                        const audioCtx = new AudioContext();
-                        const audioBuffer = audioCtx.createBuffer(channels, MAX_SAMPLES, sampleRate);
-                        this.audioSource = audioCtx.createBufferSource();
-                        this.audioSource.buffer = audioBuffer;
-                        this.audioSource.connect(audioCtx.destination);
-                    }
-                    if (this.videoReady && !this.audioPlaying) {
-                        this.audioPlaying = true;
-                        this.audioSource.start();
-                        this.graphicsWorker.postMessage({ audioStart: true });
-                    }
-                    
-                    audio.forEach((newBuf, channel) => this.audioSource?.buffer?.copyToChannel(newBuf, channel, this.audioSize));
-                    this.audioSize += audio[0].length;
+                    if (this.init) return;
+                    const { audio } = e.data;
+                    this.graphicsWorker.postMessage({ audio }, [audio]);
                     return;
                 }
                 case 'subtitle': {
+                    if (this.init) return;
                     const { displaySet } = e.data;
                     this.graphicsWorker.postMessage({ displaySet }, [displaySet.bitmap]);
                     return;
                 }
                 case 'decodingComplete': {
-                    this.cmdIdx++;
-                    this.runMovieObjectLoop();
+                    // this.cmdIdx++;
+                    // this.runMovieObjectLoop();
                     return;
                 }
             }
         }
 
         this.graphicsWorker.onmessage = async e => {
-            if (e.data.videoReady) {
-                this.videoReady = e.data.videoReady;
+        //     if (e.data.videoReady) {
+        //         this.videoReady = e.data.videoReady;
                 
-                if (!this.audioPlaying && this.audioSource) {
-                    this.audioPlaying = true;
-                    this.audioSource.start();
-                    this.graphicsWorker.postMessage({ audioStart: true });
-                }
-            }
+        //         if (!this.audioPlaying && this.audioSource) {
+        //             this.audioPlaying = true;
+        //             this.audioSource.start();
+        //             this.graphicsWorker.postMessage({ audioStart: true });
+        //         }
+        //     }
             if (e.data.timestamp && this.timestamp < e.data.timestamp) {
                 this.timestamp = e.data.timestamp;
-                // instance.setCurrentTime((timestamp / 2 - 189000000) / 45000);
+        //         // instance.setCurrentTime((timestamp / 2 - 189000000) / 45000);
             }
+        }
+    }
+
+    private createStreams() {
+        const videoTrack = new MediaStreamTrackGenerator({ kind: 'video' });
+        const audioTrack = new MediaStreamTrackGenerator({ kind: 'audio' });
+        const mediaStream = new MediaStream([videoTrack, audioTrack]);
+        this.videoEl.srcObject = mediaStream;
+
+        return {
+            videoWriter: videoTrack.writable, 
+            audioWriter: audioTrack.writable,
         }
     }
 
@@ -190,10 +196,7 @@ export default class BlurayPlayer {
             : playitemIdx >= 0 
                 ? playlist.playItems[playitemIdx] 
                 : playlist.playItems[0];
-        // this.clpi = await new Promise<ClpiInfo>(resolve => {
-        //     this.resolveClpi = resolve;
-        // });
-        this.demux({ dirHandle: this.dirHandle, clipId: playItem.clipId });
+        this.demux({ dirHandle: this.dirHandle, clipId: playItem.clipId, time: 0 });
         return false;
     }
 
@@ -764,15 +767,20 @@ export default class BlurayPlayer {
             }
         }
 
-        // this.demux({ dirHandle, clipId: '00000' });
-        // this.clpi = await new Promise<ClpiInfo>(resolve => {
-        //     this.resolveClpi = resolve;
-        // });
+        this.demux({ dirHandle, clipId: '00020', time: 0 });
 
-        this.runMovieObjectLoop();
+        // this.runMovieObjectLoop();
+    }
+
+    test() {
+        if (!this.dirHandle) return;
+        // this.demux({ dirHandle: this.dirHandle, clipId: '00020', time: 30 });
     }
 
     demux(options: DemuxOptions) {
+        this.init = true;
         this.decodingWorker.postMessage(options);
+        const { videoWriter, audioWriter } = this.createStreams();
+        this.graphicsWorker.postMessage({ videoWriter, audioWriter }, [videoWriter, audioWriter]);
     }
 }
