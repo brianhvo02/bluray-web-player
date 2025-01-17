@@ -1,9 +1,10 @@
 import BlurayRegister, { isValidRegister, PSR_FLAG, PsrIdx } from './BlurayRegister.js';
-import { MAX_SAMPLES } from './consts.js';
 import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet, HdmvInsnPlay, HdmvInsnJump, HdmvInsnCmp } from './enums/HdmvInsn.js';
 import { IndexObjectType } from './enums/Index.js';
 import { IndexRoot, IndexAppInfo, IndexTitle, indxObjIsHdmv } from './Index.js';
-import { byteArrToString, getBit, getPathArrayBuffer, getStreams, StreamType, uoMaskParse } from './utils.js';
+import { byteArrToString, getBit, getPathArrayBuffer, StreamType, uoMaskParse } from './utils.js';
+// @ts-ignore
+import SubtitlesOctopus from 'https://cdn.jsdelivr.net/npm/libass-wasm@4.1.0/+esm';
 
 export default class BlurayPlayer {
     dirHandle?: FileSystemDirectoryHandle;
@@ -24,17 +25,14 @@ export default class BlurayPlayer {
     cmdIdx = 0;
     playlistIdx: Number | null = null;
     videoEl: HTMLVideoElement;
+    extCanvasEl: HTMLCanvasElement;
+    externalSubs: SubtitlesOctopus | null = null;
 
     constructor(options: BlurayPlayerOptions) {
-        // @ts-ignore
-        window.register = this.register;
-        
         this.videoEl = options.videoEl;
-        
-        const canvas = document.getElementById(options?.canvasId ?? 'canvas');
-        if (!canvas || !(canvas instanceof HTMLCanvasElement))
-            throw new Error(`No <canvas> element with id ${options?.canvasId ?? 'canvas'} found`);
-        const offscreenCanvas = canvas.transferControlToOffscreen();
+        this.extCanvasEl = options.extCanvasEl;
+
+        const offscreenCanvas = options.canvasEl.transferControlToOffscreen();
 
         this.graphicsWorker = new Worker(new URL('./BlurayGraphics.js', import.meta.url), { type: 'module' });
         this.graphicsWorker.postMessage({ canvas: offscreenCanvas }, [offscreenCanvas]);
@@ -66,27 +64,17 @@ export default class BlurayPlayer {
                     this.graphicsWorker.postMessage({ displaySet }, [displaySet.bitmap]);
                     return;
                 }
-                case 'decodingComplete': {
-                    // this.cmdIdx++;
-                    // this.runMovieObjectLoop();
-                    return;
+                case 'startTime': {
+                    const { startTime } = e.data;
+                    this.graphicsWorker.postMessage({ startTime });
                 }
             }
         }
 
         this.graphicsWorker.onmessage = async e => {
-        //     if (e.data.videoReady) {
-        //         this.videoReady = e.data.videoReady;
-                
-        //         if (!this.audioPlaying && this.audioSource) {
-        //             this.audioPlaying = true;
-        //             this.audioSource.start();
-        //             this.graphicsWorker.postMessage({ audioStart: true });
-        //         }
-        //     }
             if (e.data.timestamp && this.timestamp < e.data.timestamp) {
                 this.timestamp = e.data.timestamp;
-        //         // instance.setCurrentTime((timestamp / 2 - 189000000) / 45000);
+                this.externalSubs?.setCurrentTime(e.data.timestamp);
             }
         }
     }
@@ -767,18 +755,41 @@ export default class BlurayPlayer {
             }
         }
 
-        this.demux({ dirHandle, clipId: '00020', time: 0 });
-
+        this.demux({ dirHandle: this.dirHandle, clipId: '00001', time: 20 * 60 });
         // this.runMovieObjectLoop();
     }
 
-    test() {
+    async demux(options: DemuxOptions) {
         if (!this.dirHandle) return;
-        // this.demux({ dirHandle: this.dirHandle, clipId: '00020', time: 30 });
-    }
-
-    demux(options: DemuxOptions) {
+        if (this.externalSubs) {
+            this.externalSubs.dispose();
+            this.externalSubs = null;
+        }
         this.init = true;
+
+        try {
+            const subtitlesDirHandle = await this.dirHandle.getDirectoryHandle('SUBTITLES')
+                .then(handle => handle.getDirectoryHandle(options.clipId));
+            const attachments = await subtitlesDirHandle.getDirectoryHandle('attachments')
+                .then(handle => Array.fromAsync(handle.values()))
+                .then(handles => Promise.all((handles as FileSystemFileHandle[])
+                    .map((handle) => handle.getFile())));
+            const fonts = attachments.map(attachment => URL.createObjectURL(attachment));
+            const subUrl = await subtitlesDirHandle.getFileHandle('subs.ass')
+                .then(handle => handle.getFile())
+                .then(file => URL.createObjectURL(file));
+            this.externalSubs = new SubtitlesOctopus({
+                canvas: this.extCanvasEl,
+                workerUrl: '../libs/subtitles-octopus-worker.js',
+                subUrl, fonts,
+            });
+        } catch(e) {
+            console.log('Could not load external subtitles. Assuming none.');
+        }
+
+        if (options.subtitle === undefined && this.externalSubs)
+            options.subtitle = -1;
+
         this.decodingWorker.postMessage(options);
         const { videoWriter, audioWriter } = this.createStreams();
         this.graphicsWorker.postMessage({ videoWriter, audioWriter }, [videoWriter, audioWriter]);

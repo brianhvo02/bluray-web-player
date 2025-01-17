@@ -3,8 +3,8 @@ export default class BlurayGraphics {
     private frames: VideoFrame[] = [];
     private audio: AudioData[] = [];
     private displaySets: DisplaySet[] = [];
-    private currentDisplaySet: DisplaySet | null = null;
     private start: number | null = null;
+    private startTime = 0;
     videoWriter?: WritableStreamDefaultWriter<VideoFrame | AudioData>;
     audioWriter?: WritableStreamDefaultWriter<VideoFrame | AudioData>;
     animationId?: number;
@@ -20,16 +20,18 @@ export default class BlurayGraphics {
         return new this(canvas);
     }
 
-    private constructor(
-        canvas: OffscreenCanvas
-    ) {
+    private constructor(canvas: OffscreenCanvas) {
         const ctx = canvas.getContext('2d');
         if (!ctx) throw new Error('Could not get 2d context of canvas');
         this.ctx = ctx;
 
         self.onmessage = (e) => {
-            const { frame, audio, displaySet, videoWriter, audioWriter } = e.data;
+            const { frame, audio, displaySet, videoWriter, audioWriter, startTime } = e.data;
         
+            if (startTime) {
+                this.startTime = startTime;
+                return;
+            }
             if (displaySet) this.displaySets.push(displaySet);
             if (frame) this.frames.push(frame);
             if (audio) this.audio.push(audio);
@@ -57,6 +59,8 @@ export default class BlurayGraphics {
 
         const latestFrameIdx = this.frames.findIndex(frame => frame.timestamp > (time - this.start!) * 1000);
         const framesToDraw = this.frames.splice(0, latestFrameIdx);
+        if (framesToDraw.length)
+            self.postMessage({ timestamp: framesToDraw[framesToDraw.length - 1].timestamp / 1000000 + this.startTime })
         for (const frame of framesToDraw)
             await this.videoWriter.write(frame);
 

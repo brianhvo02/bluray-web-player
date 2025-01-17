@@ -12,6 +12,7 @@ let flag = true;
 class BlurayDecoder {
     file: File;
     clpi: ClpiInfo;
+    time: number;
     initialPacketIdx: number;
     private videoContinuity: number | null = null;
     private audioContinuity: number | null = null;
@@ -21,7 +22,6 @@ class BlurayDecoder {
     private pendingAudio: Uint8Array[] = [];
     private pendingPg: Uint8Array[] = [];
     private audioPacketSize: number | null = null;
-    private audioOffset: number | null = null;
     private displaySet: Partial<DisplaySet> = {};
     private decoder: VideoDecoder | null = null;
     private newDecoder = true;
@@ -228,7 +228,6 @@ class BlurayDecoder {
 
     lookupClipSpn(timestamp: number) {
         const { presentationStartTime, presentationEndTime } = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0];
-        console.log('presentationStartTime:', presentationStartTime);
         console.log('total time:', (presentationEndTime - presentationStartTime) / 45000)
         const entry = this.clpi.cpiInfo.entries[0];
         const maxCoarseIdx = entry.coarse.findIndex(({ ptsEp }) => ((ptsEp & ~0x01) << 18) > timestamp + presentationStartTime);
@@ -250,8 +249,12 @@ class BlurayDecoder {
             fineIdx = 0;
         }
     
-        const { spnEp, refEpFineId } = entry.coarse[i];
-        return (spnEp & ~0x1FFFF) + entry.fine[refEpFineId + fineIdx].spnEp;
+        const { spnEp, refEpFineId, ptsEp } = entry.coarse[i];
+        const fine = entry.fine[refEpFineId + fineIdx];
+        return {
+            packet: (spnEp & ~0x1FFFF) + fine.spnEp,
+            pts: ((ptsEp & ~0x01) << 18) + (fine.ptsEp << 8),
+        };
     }
 
     getDecoder() {
@@ -276,9 +279,16 @@ class BlurayDecoder {
         this.file = file;
         this.clpi = clpi;
         this.streamMap = getStreams(clpi);
-        this.initialPacketIdx = time ? this.lookupClipSpn(time * 45000) : 0;
+        const { packet, pts } = time ? this.lookupClipSpn(time * 45000) : { packet: 0, pts: 0 };
+        this.initialPacketIdx = packet;
+        this.time = pts * 2;
+        self.postMessage({ type: 'startTime', startTime: (pts - this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime) / 45000 });
         this.buffersLoaded = new Promise<void>(async resolve => {
             for (let i = 0; i < Math.ceil(this.file.size / (GIGABYTE_PACKETS * 192)); i++) {
+                if (i < Math.floor(packet / GIGABYTE_PACKETS)) {
+                    this.buffers.push(new Promise(resolve => resolve(new ArrayBuffer())));
+                    continue;
+                }
                 const end = (i + 1) * GIGABYTE_PACKETS * 192;
                 this.buffers.push(this.file.slice(...[i * GIGABYTE_PACKETS * 192].concat(end < this.file.size ? end : [])).arrayBuffer());
                 await this.buffers[i];
@@ -422,7 +432,7 @@ class BlurayDecoder {
                 }
                 case 0x16: { // PGS_PG_COMPOSITION
                     // console.log('PGS_PG_COMPOSITION');
-                    const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
+                    const baseTs = this.time || this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
                     this.displaySet.timestamp = ((timestamp ?? baseTs) - baseTs) / 90 * 1000;
                     this.displaySet.compositionInfo = {
                         videoDescriptor: {
@@ -507,18 +517,19 @@ class BlurayDecoder {
         if (this.audioContinuity === null)
             this.audioContinuity = continuityCounter - 1;
 
-        if ((this.audioContinuity + 1) % 16 !== continuityCounter) {
+        if ((this.audioContinuity + 1) % 16 !== continuityCounter)
             console.error('Audio continuity error');
-            return;
-        }
+            
         this.audioContinuity = continuityCounter;
 
-        if (this.audioPacketSize === null && startCode && !continuityCounter)
-            this.audioPacketSize = newPacketSize;
+        // if (this.audioPacketSize === null && startCode && !continuityCounter)
+        //     this.audioPacketSize = newPacketSize;
         if (startCode && this.prevAudioTimestamp === null)
             this.prevAudioTimestamp = timestamp;
+        if ((this.prevAudioTimestamp ?? 0) <= this.time && !startCode)
+            return;
         if (startCode && payload[0] === 0x05 && payload[1] === 0xA0) {
-            if (this.pendingAudio.length) {
+            if (this.pendingAudio.length > 1) {
                 if (this.audioPacketSize)
                     console.error('PES packet mismatch');
                 const payload = joinArrayBuffers(this.pendingAudio);
@@ -534,15 +545,13 @@ class BlurayDecoder {
                     data.set([0, buf[idx + 2], buf[idx + 1], buf[idx]], i * 4);
                 }
 
-                const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
-                if (!this.audioOffset) 
-                    this.audioOffset = this.prevAudioTimestamp ?? baseTs;
+                const baseTs = this.time || this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
                 const audio = new AudioData({
                     format: 's32',
                     sampleRate,
                     numberOfFrames: data.byteLength / 4 / numberOfChannels,
                     numberOfChannels,
-                    timestamp: ((this.prevAudioTimestamp ?? baseTs) - this.audioOffset) / 90 * 1000,
+                    timestamp: ((this.prevAudioTimestamp ?? baseTs) - baseTs) / 90 * 1000,
                     data,
                     transfer: [data.buffer],
                 });
@@ -556,15 +565,14 @@ class BlurayDecoder {
             this.audioPacketSize = newPacketSize;
             this.prevAudioTimestamp = timestamp;
             this.pendingAudio.push(payload);
-        } else {
+        } else if (this.audioPacketSize !== null) {
             this.pendingAudio.push(payload);
-            if (this.audioPacketSize !== null)
-                this.audioPacketSize -= payload.byteLength;
+            this.audioPacketSize -= payload.byteLength;
         }
     }
 
     private async decodeVideoBuf() {
-        const baseTs = this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
+        const baseTs = this.time || this.clpi.sequenceInfo.atcSeq[0].stcSeq[0].presentationStartTime * 2;
         const newBuf = joinArrayBuffers(this.pendingVideo);
 
         const iframeIdx = newBuf.findIndex((val, idx, arr) => val === 0 && arr[idx + 1] === 0 && (
@@ -600,10 +608,8 @@ class BlurayDecoder {
         if (this.videoContinuity === null)
             this.videoContinuity = continuityCounter - 1;
 
-        if ((this.videoContinuity + 1) % 16 !== continuityCounter) {
+        if ((this.videoContinuity + 1) % 16 !== continuityCounter)
             console.error('Video continuity error');
-            return;
-        }
 
         this.videoContinuity = continuityCounter;
         
@@ -616,7 +622,6 @@ class BlurayDecoder {
         } else this.pendingVideo.push(payload);
     }
 
-    
     async demux(options?: DemuxOptions) { 
         this.currentVideoPid =  this.streamMap.video[options?.video ?? 0]?.pid ?? null;
         this.currentAudioPid = this.streamMap.audio[options?.audio ?? 0]?.pid ?? null;
@@ -675,7 +680,7 @@ onmessage = async function(e: MessageEvent<DemuxOptions>) {
         decoder.close();
         await demuxer;
     }
-    const { dirHandle, clipId, time, ...options } = e.data;
+    const { dirHandle, clipId, time } = e.data;
     
     const clpi = await getPathArrayBuffer(dirHandle, `BDMV/CLIPINF/${clipId}.clpi`)
         .then(BlurayDecoder.getClipInfo);
@@ -686,5 +691,5 @@ onmessage = async function(e: MessageEvent<DemuxOptions>) {
     self.postMessage({ type: 'clipInfo', clpi });
     
     decoder = new BlurayDecoder(file, clpi, time);
-    demuxer = decoder.demux();
+    demuxer = decoder.demux(e.data);
 }

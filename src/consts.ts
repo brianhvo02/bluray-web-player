@@ -1,8 +1,6 @@
-export const GIGABYTE = Math.pow(2, 30);
-export const MAX_SAMPLES = GIGABYTE / (2 * 4);
-
 export const MAX_INT = Math.pow(2, 31) - 1;
 export const MIN_INT = -Math.pow(2, 31);
+export const GIGABYTE = Math.pow(2, 30);
 export const GIGABYTE_PACKETS = Math.floor(GIGABYTE / 192);
 
 export const BITS_PER_SAMPLE = [0, 16, 20, 24];

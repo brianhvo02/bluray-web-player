@@ -68,8 +68,9 @@ interface DisplaySet {
 }
 
 interface BlurayPlayerOptions {
-    canvasId?: string;
     videoEl: HTMLVideoElement;
+    canvasEl: HTMLCanvasElement;
+    extCanvasEl: HTMLCanvasElement;
 }
 
 interface DecodingVideoMessage {
@@ -92,11 +93,12 @@ interface DecodingClipInfoMessage {
     clpi: ClpiInfo;
 }
 
-interface DecodingCompleteMessage {
-    type: 'decodingComplete'
+interface DecodingStartMessage {
+    type: 'startTime';
+    startTime: number;
 }
 
-type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage | DecodingCompleteMessage;
+type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage | DecodingStartMessage;
 
 interface DemuxOptions {
     dirHandle: FileSystemDirectoryHandle;

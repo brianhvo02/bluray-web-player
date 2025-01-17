@@ -19,3 +19,13 @@ declare class MediaStreamTrackGenerator extends MediaStreamTrack {
     constructor(options: MediaStreamTrackGeneratorOptions)
     readonly writable: WritableStream<VideoFrame | AudioData>
 }
+
+declare interface SubtitlesOctopusOptions {
+    video: HTMLVideoElement;
+    subUrl: string;
+    fonts: string[];
+}
+
+declare class SubtitlesOctopus {
+    constructor(options: SubtitlesOctopusOptions)
+}
