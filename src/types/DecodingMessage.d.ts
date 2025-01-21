@@ -98,7 +98,14 @@ interface DecodingStartMessage {
     startTime: number;
 }
 
-type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage | DecodingSubtitlesMessage | DecodingClipInfoMessage | DecodingStartMessage;
+interface DecodingCompleteMessage {
+    type: 'decodingComplete';
+}
+
+
+type DecodingMessage = DecodingVideoMessage | DecodingAudioMessage 
+    | DecodingSubtitlesMessage | DecodingClipInfoMessage 
+    | DecodingStartMessage | DecodingCompleteMessage;
 
 interface DemuxOptions {
     dirHandle: FileSystemDirectoryHandle;

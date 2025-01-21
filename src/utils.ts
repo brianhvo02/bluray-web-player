@@ -129,3 +129,195 @@ export const uoMaskParse = (buf: Uint8Array): UoMask => ({
     secondaryAudioChange         : Boolean(getBit(buf[3], 0)),
     pipPgChange                  : Boolean(getBit(buf[4], 6)),
 });
+
+export const getClipInfo = function(buf: ArrayBuffer): ClpiInfo {
+    const dataView = new DataView(buf);
+    const arr = new Uint8Array(buf);
+
+    const bdHeader: BlurayHeader = {
+        tag: byteArrToString(arr, 0, 4),
+        ver: byteArrToString(arr, 4, 4),
+    };
+    
+    const sequenceInfoStartIdx = dataView.getUint32(8);
+    const programInfoStartIdx = dataView.getUint32(12);
+    const cpiStartIdx = dataView.getUint32(16);
+    // const clipMarkStartIdx = dataView.getUint32(20);
+    // const extDataStartIdx = dataView.getUint32(24);
+    
+    // TODO: ext_data
+    
+    const tsTypeInfoLength = dataView.getUint16(188);
+    const clipInfo: ClipInfo = {
+        // clipInfoLength: dataView.getUint32(40),
+        clipStreamType: arr[46],
+        applicationType: arr[47],
+        isAtcDelta: Boolean(arr[51] & 1),
+        tsRecordingRate: dataView.getUint32(52),
+        numSourcePackets: dataView.getUint32(56),
+        // tsTypeInfoLength,
+        tsTypeInfo: tsTypeInfoLength ? {
+            validity: arr[190],
+            formatId: byteArrToString(arr, 191, 4)
+        } : undefined,
+        // TODO: is_atc_delta
+    };
+    // TODO: font info
+    
+    const sequenceInfo: SequenceInfo = {
+        // sequenceInfoLength: dataView.getUint32(sequenceInfoStartIdx),
+        // numAtcSeq: arr[sequenceInfoStartIdx + 5],
+        atcSeq: Array(arr[sequenceInfoStartIdx + 5]).fill(0).reduce(([offset, seqs]) => {
+            const numStcSeq = arr[offset + 4];
+            const seq = {
+                spnAtcStart: dataView.getUint32(offset),
+                // numStcSeq: arr[offset + 4],
+                offsetStcId: arr[offset + 5],
+                stcSeq: [...Array(numStcSeq).keys()].map(i => {
+                    const stcSeqIdx =  offset + 6 + i * 14;
+                    return {
+                        pcrPid: dataView.getUint16(stcSeqIdx),
+                        spnStcStart: dataView.getUint32(stcSeqIdx + 2),
+                        presentationStartTime: dataView.getUint32(stcSeqIdx + 6),
+                        presentationEndTime: dataView.getUint32(stcSeqIdx + 10),
+                    }
+                }),
+            };
+            seqs.push(seq);
+            return [offset + 6 + numStcSeq * 14, seqs];
+        }, [sequenceInfoStartIdx + 6, []])[1],
+    };
+    
+    const programInfo: ProgramInfo = {
+        // programInfoLength: dataView.getUint32(programInfoStartIdx),
+        // numProg: arr[programInfoStartIdx + 5],
+        prog: Array(arr[programInfoStartIdx + 5]).fill(0).reduce(([offset, progs]) => {
+            const numStreams = arr[offset + 6];
+            const seq = {
+                spnProgramSequenceStart: dataView.getUint32(offset),
+                programMapPid: dataView.getUint16(offset + 4),
+                numStreams,
+                numGroups: arr[offset + 7],
+                ps: Array(arr[offset + 6]).fill(0).reduce(([offset, progs]) => {
+                    const pid = dataView.getUint16(offset);
+                    const len = arr[offset + 2];
+                    const codingType = arr[offset + 3];
+                    switch (codingType) {
+                        case StreamType.VIDEO_MPEG1:
+                        case StreamType.VIDEO_MPEG2:
+                        case StreamType.VIDEO_VC1:
+                        case StreamType.VIDEO_H264:
+                        case StreamType.VIDEO_HEVC:
+                        case 0x20:
+                            progs.push({
+                                codingType,
+                                pid,
+                                format: (arr[offset + 4] & 0xF0) >> 4,
+                                rate: arr[offset + 4] & 0xF,
+                                aspect: (arr[offset + 5] & 0xF0) >> 4,
+                                ocFlag: (arr[offset + 5] & 0b10) >> 1,
+                                crFlag: codingType == 0x24 ?
+                                    arr[offset + 5] & 1 :
+                                    null,
+                                dynamicRangeType: codingType == 0x24 ?
+                                    (arr[offset + 6] & 0xF0) >> 4:
+                                    null,
+                                colorSpace: codingType == 0x24 ?
+                                    arr[offset + 6] & 0xF :
+                                    null,
+                                hdrPlusFlag: codingType == 0x24 ?
+                                    (arr[offset + 6] & 0x80) >> 7 :
+                                    null,
+                            });
+                            break;
+                
+                        case StreamType.AUDIO_MPEG1:
+                        case StreamType.AUDIO_MPEG2:
+                        case StreamType.AUDIO_LPCM:
+                        case StreamType.AUDIO_AC3:
+                        case StreamType.AUDIO_DTS:
+                        case StreamType.AUDIO_TRUHD:
+                        case StreamType.AUDIO_AC3PLUS:
+                        case StreamType.AUDIO_DTSHD:
+                        case StreamType.AUDIO_DTSHD_MASTER:
+                        case StreamType.AUDIO_AC3PLUS_SECONDARY:
+                        case StreamType.AUDIO_DTSHD_SECONDARY:
+                            progs.push({
+                                codingType,
+                                pid,
+                                format: (arr[offset + 4] & 0xF0) >> 4,
+                                rate: arr[offset + 4] & 0xF,
+                                lang: byteArrToString(arr, offset + 5, 3),
+                            });
+                            break;
+                
+                        case StreamType.SUB_PG:
+                        case StreamType.SUB_IG:
+                        case 0xa0:
+                            progs.push({
+                                codingType,
+                                pid,
+                                lang: byteArrToString(arr, offset + 4, 3),
+                            });
+                            break;
+                
+                        case StreamType.SUB_TEXT:
+                            progs.push({
+                                codingType,
+                                pid,
+                                charCode: byteArrToString(arr, offset + 4, 1),
+                                lang: byteArrToString(arr, offset + 5, 3),
+                            });
+                            break;
+                
+                        default: break;
+                    };
+    
+                    return [offset + len + 3, progs];
+                }, [offset + 8, []])[1],
+            };
+            progs.push(seq);
+            return [offset + 6 + numStreams * 14, progs];
+        }, [programInfoStartIdx + 6, []])[1],
+    };
+    
+    const cpiInfo: CpiInfo = {
+        // cpiLength: dataView.getUint32(cpiStartIdx),
+        type: arr[cpiStartIdx + 5] & 0x0F,
+        numStreamPid: arr[cpiStartIdx + 7],
+        entries: Array(arr[cpiStartIdx + 7]).fill(0).reduce(([offset, cpiEntries]) => {
+            const numEpCoarse = ((arr[offset + 3] & 0b11) << 15) | (arr[offset + 4] << 6) | ((arr[offset + 5] & 0xFC) >> 2);
+            const numEpFine = ((arr[offset + 5] & 0b11) << 16 | dataView.getUint16(offset + 6));
+            const mapStreamStartAddress = cpiStartIdx + 6 + dataView.getUint32(offset + 8);
+            const fineStart = dataView.getUint32(mapStreamStartAddress);
+            cpiEntries.push({
+                pid: dataView.getUint16(offset),
+                epStreamType: (arr[offset + 3] & 0x3C) >> 2,
+                // numEpCoarse,
+                // numEpFine,
+                // mapStreamStartAddress,
+                coarse: [...Array(numEpCoarse).keys()].map(i => {
+                    const coarseIdx = mapStreamStartAddress + 4 + i * 8
+                    return {
+                        refEpFineId: (dataView.getUint32(coarseIdx) & 0xFFFFC000) >> 0xE,
+                        ptsEp: dataView.getUint32(coarseIdx) & 0x3FFF,
+                        spnEp: dataView.getUint32(coarseIdx + 4),
+                    }
+                }),
+                fine: [...Array(numEpFine).keys()].map(i => {
+                    const fineIdx = mapStreamStartAddress + fineStart + i * 4;
+                    return {
+                        isAngleChangePoint: Boolean((arr[fineIdx] & 0x80) >> 7),
+                        iEndPositionOffset: (arr[fineIdx] & 0x70) >> 4,
+                        ptsEp: ((arr[fineIdx] & 0xF) << 7) | ((arr[fineIdx + 1] & 0xFE) >> 1),
+                        spnEp: ((arr[fineIdx + 1] & 1) << 16) | (arr[fineIdx + 2] << 8) | arr[fineIdx + 3],
+                    }
+                }),
+            });
+    
+            return [offset + 6 + dataView.getUint32(offset + 8) + fineStart + numEpFine * 4, cpiEntries];
+        }, [cpiStartIdx + 8, []])[1],
+    };
+
+    return { bdHeader, clipInfo, sequenceInfo, programInfo, cpiInfo };
+}

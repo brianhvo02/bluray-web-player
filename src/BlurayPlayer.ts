@@ -2,7 +2,7 @@ import BlurayRegister, { isValidRegister, PSR_FLAG, PsrIdx } from './BlurayRegis
 import { HdmvInsnGrp, HdmvInsnGrpSet, HdmvInsnSetSystem, HdmvInsnGrpBranch, HdmvInsnGoto, HdmvInsnSet, HdmvInsnPlay, HdmvInsnJump, HdmvInsnCmp } from './enums/HdmvInsn.js';
 import { IndexObjectType } from './enums/Index.js';
 import { IndexRoot, IndexAppInfo, IndexTitle, indxObjIsHdmv } from './Index.js';
-import { byteArrToString, getBit, getPathArrayBuffer, StreamType, uoMaskParse } from './utils.js';
+import { byteArrToString, getBit, getClipInfo, getPathArrayBuffer, StreamType, uoMaskParse } from './utils.js';
 // @ts-ignore
 import SubtitlesOctopus from 'https://cdn.jsdelivr.net/npm/libass-wasm@4.1.0/+esm';
 
@@ -15,8 +15,7 @@ export default class BlurayPlayer {
     timestamp = 0;
     graphicsWorker: Worker;
     decodingWorker: Worker;
-    // clpi?: ClpiInfo;
-    // resolveClpi?: (value: ClpiInfo | PromiseLike<ClpiInfo>) => void;
+    clpi?: ClpiInfo;
     register = new BlurayRegister();
     mobj: MovieObject | null = null;
     indx: IndexRoot | null = null;
@@ -42,8 +41,7 @@ export default class BlurayPlayer {
             switch (e.data.type) {
                 case 'clipInfo': {
                     this.init = false;
-                    // if (this.resolveClpi)
-                    //     this.resolveClpi(e.data.clpi);
+                    // this.clpi = e.data.clpi;
                     return;
                 }
                 case 'video': {
@@ -67,6 +65,12 @@ export default class BlurayPlayer {
                 case 'startTime': {
                     const { startTime } = e.data;
                     this.graphicsWorker.postMessage({ startTime });
+                    return;
+                }
+                case 'decodingComplete': {
+                    this.cmdIdx++;
+                    this.runMovieObjectLoop();
+                    return;
                 }
             }
         }
@@ -177,14 +181,14 @@ export default class BlurayPlayer {
             console.error('no playlist found');
             return false;
         }
-
         const playMark = playmarkIdx >= 0 ? playlist.playMarks[playmarkIdx] : null;
-        const playItem = playMark
-            ? {}
+        const { clipId, inTime } = playMark
+            ? playlist.playItems[playMark.playItemRef]
             : playitemIdx >= 0 
-                ? playlist.playItems[playitemIdx] 
+                ? playlist.playItems[playitemIdx]
                 : playlist.playItems[0];
-        this.demux({ dirHandle: this.dirHandle, clipId: playItem.clipId, time: 0 });
+        const time = playMark ? (playMark.time - inTime) / 45000 : 0;
+        this.demux({ dirHandle: this.dirHandle, clipId, time });
         return false;
     }
 
@@ -755,8 +759,8 @@ export default class BlurayPlayer {
             }
         }
 
-        this.demux({ dirHandle: this.dirHandle, clipId: '00001', time: 20 * 60 });
-        // this.runMovieObjectLoop();
+        // this.demux({ dirHandle: this.dirHandle, clipId: '00001', time: 0});
+        this.runMovieObjectLoop();
     }
 
     async demux(options: DemuxOptions) {
